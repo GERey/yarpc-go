@@ -25,60 +25,30 @@ import (
 	"time"
 
 	"go.uber.org/yarpc/api/transport"
-	"go.uber.org/yarpc/internal/backoff"
 	"go.uber.org/yarpc/internal/ioutil"
 )
-
-// middlewareOptions enumerates the options for retry middleware.
-type middlewareOptions struct {
-	// Retries is the number of attempts we will retry (after the
-	// initial attempt.
-	retries uint
-
-	// Timeout is the Timeout we will enforce per request (if this
-	// is less than the context deadline, we'll use that instead).
-	timeout time.Duration
-
-	// backoff is a backoff strategy that will be called after every retry.
-	backoff backoff.Strategy
-}
-
-var defaultMiddlewareOptions = middlewareOptions{
-	retries: 1,
-	timeout: time.Second,
-	backoff: backoff.FixedBackoff(time.Millisecond * 200).Backoff,
-}
 
 // MiddlewareOption customizes the behavior of a retry middleware.
 type MiddlewareOption func(*middlewareOptions)
 
-// Retries is the number of attempts we will retry (after the
-// initial attempt.
-//
-// Defaults to 1.
-func Retries(retries uint) MiddlewareOption {
-	return func(options *middlewareOptions) {
-		options.retries = retries
-	}
+// middlewareOptions enumerates the options for retry middleware.
+type middlewareOptions struct {
+	// policyProvider is a function that will provide a Retry policy
+	// for a context and request.
+	policyProvider PolicyProvider
 }
 
-// PerRequestTimeout is the Timeout we will enforce per request (if this
-// is less than the context deadline, we'll use that instead).
-//
-// Defaults to 1 second.
-func PerRequestTimeout(timeout time.Duration) MiddlewareOption {
-	return func(options *middlewareOptions) {
-		options.timeout = timeout
-	}
+var defaultMiddlewareOptions = middlewareOptions{
+	policyProvider: func(context.Context, *transport.Request) *Policy {
+		return &defaultPolicy
+	},
 }
 
-// BackoffStrategy sets the backoff strategy that will be used after each
-// failed request.
-//
-// Defaults to a 200ms backoff for every request.
-func BackoffStrategy(strategy backoff.Strategy) MiddlewareOption {
-	return func(options *middlewareOptions) {
-		options.backoff = strategy
+// WithPolicyProvider allows a custom retry policy to be used in the retry
+// middleware.
+func WithPolicyProvider(provider PolicyProvider) MiddlewareOption {
+	return func(opts *middlewareOptions) {
+		opts.policyProvider = provider
 	}
 }
 
@@ -99,12 +69,13 @@ type OutboundMiddleware struct {
 
 // Call implements the middleware.UnaryOutbound interface.
 func (r *OutboundMiddleware) Call(ctx context.Context, request *transport.Request, out transport.UnaryOutbound) (resp *transport.Response, err error) {
+	policy := r.getPolicy(ctx, request)
 	rereader, finish := ioutil.NewRereader(request.Body)
 	defer finish()
 	request.Body = rereader
 
-	for i := uint(0); i < r.opts.retries+1; i++ {
-		subCtx, cancel := context.WithTimeout(ctx, r.getTimeout(ctx))
+	for i := uint(0); i < policy.retries+1; i++ {
+		subCtx, cancel := context.WithTimeout(ctx, policy.getTimeout(ctx))
 		resp, err = out.Call(subCtx, request)
 		cancel() // Clear the new ctx immdediately after the call
 
@@ -119,32 +90,22 @@ func (r *OutboundMiddleware) Call(ctx context.Context, request *transport.Reques
 			return resp, err
 		}
 
-		time.Sleep(r.getBackoff(i))
+		time.Sleep(policy.getBackoff(i))
 	}
 	return resp, err
 }
 
-func (r *OutboundMiddleware) getTimeout(ctx context.Context) time.Duration {
-	ctxDeadline, ok := ctx.Deadline()
-	if !ok {
-		return r.opts.timeout
+func (r *OutboundMiddleware) getPolicy(ctx context.Context, request *transport.Request) *Policy {
+	if r.opts.policyProvider == nil {
+		return &defaultPolicy
 	}
-	now := time.Now()
-	if ctxDeadline.After(now.Add(r.opts.timeout)) {
-		return r.opts.timeout
+	if pol := r.opts.policyProvider(ctx, request); pol != nil {
+		return pol
 	}
-	return ctxDeadline.Sub(now)
+	return &defaultPolicy
 }
 
 func isRetryable(err error) bool {
 	// TODO(#1080) Update Error assertions to be more granular.
 	return transport.IsUnexpectedError(err) || transport.IsTimeoutError(err)
-}
-
-func (r *OutboundMiddleware) getBackoff(attempt uint) time.Duration {
-	if r.opts.backoff == nil {
-		return time.Duration(0)
-	}
-
-	return r.opts.backoff(attempt)
 }

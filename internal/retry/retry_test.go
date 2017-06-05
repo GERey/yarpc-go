@@ -403,9 +403,15 @@ func TestMiddleware(t *testing.T) {
 			out.Start()
 
 			retry := NewUnaryMiddleware(
-				Retries(tt.retries),
-				PerRequestTimeout(tt.retrytimeout),
-				BackoffStrategy(tt.retryBackoff),
+				WithPolicyProvider(
+					func(context.Context, *transport.Request) *Policy {
+						return NewPolicy(
+							Retries(tt.retries),
+							PerRequestTimeout(tt.retrytimeout),
+							BackoffStrategy(tt.retryBackoff),
+						)
+					},
+				),
 			)
 
 			ctx := context.Background()
