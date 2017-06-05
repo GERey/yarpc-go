@@ -25,3 +25,12 @@ import "time"
 // Strategy defines a function that will return a
 // backoff time given an attempt number.
 type Strategy func(attempts uint) time.Duration
+
+// FixedBackoff is a constant backoff time that will be used
+// for every backoff time (regardless of the attempt number).
+type FixedBackoff time.Duration
+
+// Backoff will return the FixedBackoff's backoff time.
+func (d FixedBackoff) Backoff(uint) time.Duration {
+	return time.Duration(d)
+}
