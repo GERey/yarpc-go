@@ -9,7 +9,6 @@ defaults: &defaults
         reusable: true
         exclusive: true
     - run: make ci
-
 version: 2
 jobs:
   crossdock:
